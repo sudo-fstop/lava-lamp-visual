@@ -135,18 +135,21 @@ precision highp float;
 
 uniform vec2 u_resolution;
 uniform float u_time;
-uniform vec4 u_blobs[25];
 
-// Tuning constants
-const float blendK = 0.12;
-const float noiseAmp = 0.02;
-const float noiseFreq = 4.0;
+#define NUM_BLOBS 25
+uniform vec4 u_blobs[NUM_BLOBS]; // xy = position, z = radius, w = velocity_y
 
-// Hash function for noise
+// Tuning parameters
+#define BLEND_K 0.12
+#define NOISE_AMP 0.018
+#define NOISE_FREQ 3.5
+#define NOISE_TIME_SCALE 0.1
+#define EDGE_WIDTH 0.007
+#define FBM_OCTAVES 3
+
+// Hash-based pseudo-random
 float hash(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
 }
 
 // Value noise
@@ -161,12 +164,13 @@ float noise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-// Fractal Brownian Motion - 4 octaves
-float fbm(vec2 p) {
+// Fractal Brownian Motion
+float fbm(vec2 p, int octaves) {
     float value = 0.0;
     float amplitude = 0.5;
     float frequency = 1.0;
     for (int i = 0; i < 4; i++) {
+        if (i >= octaves) break;
         value += amplitude * noise(p * frequency);
         frequency *= 2.0;
         amplitude *= 0.5;
@@ -174,45 +178,34 @@ float fbm(vec2 p) {
     return value;
 }
 
-// Polynomial smooth minimum - creates stretchy viscous connections
-float smin(float a, float b, float k) {
-    float h = max(k - abs(a - b), 0.0) / k;
-    return min(a, b) - h * h * h * k * (1.0 / 6.0);
+// Polynomial smooth-min (cubic, from Inigo Quilez)
+vec2 smin(float a, float b, float k) {
+    float h = 1.0 - min(abs(a - b) / (6.0 * k), 1.0);
+    float w = h * h * h;
+    float m = w * 0.5;
+    float s = w * k;
+    return (a < b) ? vec2(a - s, m) : vec2(b - s, 1.0 - m);
 }
 
-// Hue shift utility (rotation matrix approach)
-vec3 hueShift(vec3 color, float shift) {
-    float cosA = cos(shift);
-    float sinA = sin(shift);
-    vec3 k = vec3(0.57735);
-    float oneMinusCos = 1.0 - cosA;
-    return color * cosA + cross(k, color) * sinA + k * dot(k, color) * oneMinusCos;
-}
-
-// Domain warping - organic shape distortion
-vec2 warpUV(vec2 p, float time) {
-    float warpX = fbm(p * noiseFreq + time * 0.15) * noiseAmp;
-    float warpY = fbm(p * noiseFreq + vec2(50.0, 50.0) + time * 0.12) * noiseAmp;
-    return p + vec2(warpX, warpY);
-}
-
-// SDF-based metaball computation with smooth minimum blending
-float computeSDF(vec2 pos, float aspect) {
-    float d = 1e10;
-    for (int i = 0; i < 25; i++) {
+// Raw SDF scene — union of all blob circles with smooth blending
+float scene(vec2 p, float aspect) {
+    float d = 9999.0;
+    for (int i = 0; i < NUM_BLOBS; i++) {
         vec2 bp = vec2((u_blobs[i].x - 0.5) * aspect, u_blobs[i].y - 0.5);
-        float radius = u_blobs[i].z;
-        float vel = u_blobs[i].w;
-
-        // Elongate blob along vertical axis based on velocity
-        vec2 delta = pos - bp;
-        float elongation = 1.0 + vel * 15.0;
-        delta.y /= elongation;
-
-        float blobDist = length(delta) - radius;
-        d = smin(d, blobDist, blendK);
+        float r = u_blobs[i].z;
+        float blobDist = length(p - bp) - r;
+        d = smin(d, blobDist, BLEND_K).x;
     }
     return d;
+}
+
+// Domain-warped scene for organic shapes
+float distortedScene(vec2 p, float aspect) {
+    vec2 warp = vec2(
+        fbm(p * NOISE_FREQ + u_time * NOISE_TIME_SCALE, FBM_OCTAVES),
+        fbm(p * NOISE_FREQ + 100.0 + u_time * (NOISE_TIME_SCALE * 0.75), FBM_OCTAVES)
+    );
+    return scene(p + warp * NOISE_AMP, aspect);
 }
 
 void main() {
@@ -220,103 +213,75 @@ void main() {
     float aspect = u_resolution.x / u_resolution.y;
     vec2 p = vec2((uv.x - 0.5) * aspect, uv.y - 0.5);
 
-    // Glass container shape (rounded rectangle SDF)
+    // Glass container SDF (rounded rectangle)
     float containerW = 0.28;
     float containerH = 0.44;
     float cornerR = 0.08;
     vec2 q = abs(p) - vec2(containerW, containerH) + cornerR;
     float containerSDF = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - cornerR;
-
-    // Inside/outside mask
     float inside = smoothstep(0.005, -0.005, containerSDF);
 
-    // Background gradient
+    // Liquid SDF
+    float dist = distortedScene(p, aspect);
+
+    // Blob mask with soft edge
+    float blob = smoothstep(EDGE_WIDTH, -EDGE_WIDTH, dist);
+
+    // Thickness approximation (how deep inside the liquid)
+    float thickness = clamp(-dist / 0.06, 0.0, 1.0);
+
+    // Color palette
+    vec3 deepColor = vec3(0.6, 0.03, 0.01);
+    vec3 midColor = vec3(0.9, 0.25, 0.02);
+    vec3 hotColor = vec3(1.0, 0.75, 0.2);
+
+    // Thickness-based coloring (subsurface scattering approximation)
+    vec3 liquidColor = mix(hotColor, midColor, smoothstep(0.0, 0.4, thickness));
+    liquidColor = mix(liquidColor, deepColor, smoothstep(0.4, 1.0, thickness));
+
+    // Fresnel-like edge glow (thin wax is more translucent/bright)
+    float fresnel = pow(1.0 - smoothstep(0.0, 0.3, thickness), 2.5);
+    liquidColor += vec3(1.0, 0.6, 0.1) * fresnel * 0.4;
+
+    // Internal caustics
+    float caustic = fbm(p * 8.0 + u_time * 0.05, 3) * 0.15;
+    liquidColor += vec3(1.0, 0.8, 0.3) * caustic * thickness;
+
+    // Vertical warmth gradient
+    liquidColor = mix(liquidColor, liquidColor * vec3(1.0, 0.85, 0.7), (uv.y - 0.3) * 0.5);
+
+    // Specular highlight (SDF gradient for normals) - only near surface
+    if (dist < EDGE_WIDTH * 3.0) {
+        float eps = 0.003;
+        float dx = scene(p + vec2(eps, 0.0), aspect) - scene(p - vec2(eps, 0.0), aspect);
+        float dy = scene(p + vec2(0.0, eps), aspect) - scene(p - vec2(0.0, eps), aspect);
+        vec2 normal = normalize(vec2(dx, dy));
+        vec2 lightDir = normalize(vec2(-0.3, 0.5));
+        float spec = pow(max(dot(normal, lightDir), 0.0), 16.0);
+        liquidColor += vec3(1.0, 0.95, 0.85) * spec * 0.35 * blob;
+    }
+
+    // Background
     vec3 bgBottom = vec3(0.10, 0.01, 0.01);
-    vec3 bgTop    = vec3(0.01, 0.01, 0.04);
+    vec3 bgTop = vec3(0.01, 0.01, 0.04);
     vec3 bg = mix(bgBottom, bgTop, uv.y);
 
-    // Heat shimmer in background
-    vec2 shimmerUV = uv + vec2(
-        sin(uv.y * 40.0 + u_time * 2.0) * 0.001,
-        cos(uv.x * 40.0 + u_time * 1.5) * 0.001
-    );
-    vec3 shimmerBg = mix(bgBottom, bgTop, shimmerUV.y);
-
-    // Early out for pixels far outside container
-    if (containerSDF > 0.05) {
-        // Glass rim glow
-        float rimGlow = smoothstep(0.012, 0.0, abs(containerSDF)) * 0.4;
-        vec3 rimColor = vec3(0.7, 0.75, 0.85);
-        vec3 color = shimmerBg * 0.3 + rimColor * rimGlow;
-
-        // Vignette
-        vec2 vc = (uv - 0.5) * vec2(1.2, 1.0);
-        float vignette = smoothstep(0.75, 0.3, length(vc));
-        color *= (0.5 + 0.5 * vignette);
-
-        gl_FragColor = vec4(color, 1.0);
-        return;
-    }
-
-    // Domain warping (only inside/near container)
-    vec2 wp = warpUV(p, u_time);
-
-    // Compute SDF field
-    float sdf = computeSDF(wp, aspect);
-
-    // Soft SDF boundary
-    float blob = 1.0 - smoothstep(-0.005, 0.008, sdf);
-
-    // Thickness-based coloring (subsurface translucency)
-    float thickness = max(-sdf, 0.0);
-
-    vec3 deepColor = vec3(0.60, 0.04, 0.02);
-    vec3 midColor  = vec3(0.95, 0.35, 0.02);
-    vec3 thinColor = vec3(1.0, 0.85, 0.3);
-
-    float normThickness = clamp(thickness / 0.06, 0.0, 1.0);
-    vec3 blobColor = mix(thinColor, midColor, normThickness);
-    blobColor = mix(blobColor, deepColor, smoothstep(0.3, 1.0, normThickness));
-
-    // Fresnel-like edge glow
-    float edgeDist = clamp(-sdf / 0.02, 0.0, 1.0);
-    float fresnel = pow(1.0 - edgeDist, 3.0);
-    blobColor += vec3(1.0, 0.6, 0.2) * fresnel * 0.3;
-
-    // Warmth shift by vertical position
-    blobColor = mix(blobColor, blobColor * vec3(1.0, 0.85, 0.7), uv.y * 0.3);
-
-    // Slow hue shifting over time
-    float hueOffset = sin(u_time * 0.05) * 0.15;
-    blobColor = hueShift(blobColor, hueOffset);
-
-    // SDF-based normals for specular (only near blob surface)
-    if (sdf < 0.02) {
-        float eps = 0.003;
-        float sdx = computeSDF(wp + vec2(eps, 0.0), aspect) - computeSDF(wp - vec2(eps, 0.0), aspect);
-        float sdy = computeSDF(wp + vec2(0.0, eps), aspect) - computeSDF(wp - vec2(0.0, eps), aspect);
-        vec2 normal = normalize(vec2(sdx, sdy));
-        vec2 lightDir = normalize(vec2(-0.3, 0.5));
-        float specular = pow(max(dot(normal, lightDir), 0.0), 25.0);
-        blobColor += vec3(1.0, 0.95, 0.85) * specular * 0.35 * blob;
-    }
-
-    // Glow for sub-threshold (near-surface glow)
-    float glow = smoothstep(0.05, 0.0, sdf) * (1.0 - blob);
-    vec3 glowColor = vec3(0.55, 0.10, 0.02) * glow;
-
-    // Glass rim glow
-    float rimGlow = smoothstep(0.012, 0.0, abs(containerSDF)) * 0.4;
-    vec3 rimColor = vec3(0.7, 0.75, 0.85);
+    // Oil medium background (inside container, behind blobs)
+    vec3 oilColor = vec3(0.08, 0.03, 0.01);
+    float shimmer = fbm(p * 4.0 + vec2(u_time * 0.02, u_time * 0.015), 2) * 0.03;
+    oilColor += vec3(0.5, 0.3, 0.1) * shimmer;
 
     // Composite
-    vec3 color = shimmerBg + glowColor;
-    color = mix(color, blobColor, blob);
+    vec3 color = bg;
+    color = mix(color, oilColor, inside);
+    color = mix(color, liquidColor, blob * inside);
 
-    // Apply container mask - darken outside
-    color = mix(shimmerBg * 0.3, color, inside);
-    // Add rim
-    color += rimColor * rimGlow;
+    // Glass rim
+    float rimGlow = smoothstep(0.012, 0.0, abs(containerSDF)) * 0.4;
+    color += vec3(0.7, 0.75, 0.85) * rimGlow;
+
+    // Darken outside container
+    color = mix(bg * 0.3, color, inside + rimGlow);
 
     // Vignette
     vec2 vc = (uv - 0.5) * vec2(1.2, 1.0);
@@ -346,19 +311,15 @@ gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, false, 0, 0);
 
 // ── Blob Physics ──
 const NUM_BLOBS = 25;
-const DAMPING = 0.97;
-const HEATING_ZONE = 0.15;
-const COOLING_ZONE = 0.85;
-
 const blobs = [];
 for (let i = 0; i < NUM_BLOBS; i++) {
     let r;
-    if (i < 4)       r = 0.030 + Math.random() * 0.015;  // large
-    else if (i < 12)  r = 0.016 + Math.random() * 0.014;  // medium
-    else if (i < 20)  r = 0.008 + Math.random() * 0.006;  // small
-    else               r = 0.005 + Math.random() * 0.003;  // tiny (trail/ghost)
+    if (i < 3)       r = 0.035 + Math.random() * 0.015;  // 3 large primary blobs
+    else if (i < 8)   r = 0.020 + Math.random() * 0.010;  // 5 medium blobs
+    else if (i < 15)  r = 0.012 + Math.random() * 0.006;  // 7 small blobs
+    else              r = 0.006 + Math.random() * 0.004;  // 10 trail/micro blobs
 
-    const blob = {
+    blobs.push({
         x: 0.3 + Math.random() * 0.4,
         y: 0.1 + Math.random() * 0.8,
         vx: 0,
@@ -366,75 +327,68 @@ for (let i = 0; i < NUM_BLOBS; i++) {
         radius: r,
         baseRadius: r,
         temperature: 0.5
-    };
-
-    // Trail/ghost blobs (indices 20-24) link to parent blobs
-    if (i >= 20) {
-        blob.parentIndex = i - 20; // links to blobs 0-4
-    }
-
-    blobs.push(blob);
+    });
 }
 
 function updateBlobs(dt, time) {
+    const heatZone = 0.15;
+    const coolZone = 0.85;
+    const damping = 0.97;
+    const trailStart = 15;
+
     for (let i = 0; i < NUM_BLOBS; i++) {
         const b = blobs[i];
 
-        // Temperature update
-        if (b.y < HEATING_ZONE) {
-            b.temperature = Math.min(b.temperature + 0.002 * dt * 60, 1.0);
-        } else if (b.y > COOLING_ZONE) {
-            b.temperature = Math.max(b.temperature - 0.003 * dt * 60, 0.0);
+        // Temperature update based on vertical position
+        if (b.y < heatZone) {
+            b.temperature = Math.min(b.temperature + 0.01 * dt * 60, 1.0);
+        } else if (b.y > coolZone) {
+            b.temperature = Math.max(b.temperature - 0.008 * dt * 60, 0.0);
         } else {
-            // Gradual cooling in middle
-            b.temperature = Math.max(b.temperature - 0.0005 * dt * 60, 0.0);
+            b.temperature *= (1.0 - 0.001 * dt * 60);
         }
 
-        // Buoyancy based on temperature (hot = rise, cold = sink)
-        let buoyancy = (b.temperature - 0.4) * 0.0008 * (b.radius / 0.02);
+        // Radius changes with temperature (hot = expanded, cold = shrunk)
+        const tempScale = 0.85 + 0.3 * b.temperature;
+        b.radius = b.baseRadius * tempScale + Math.sin(time * 0.4 + i * 1.7) * 0.002;
 
-        // Radius expansion/contraction with temperature
-        b.radius = b.baseRadius * (1.0 + (b.temperature - 0.5) * 0.3);
-
+        // Buoyancy based on temperature (hot rises, cold sinks)
+        const buoyancy = (b.temperature - 0.45) * 0.0006;
         b.vy += buoyancy * dt * 60;
 
-        // Trail/ghost blob behavior
-        if (b.parentIndex !== undefined) {
-            const parent = blobs[b.parentIndex];
-            const lagFactor = 0.03;
-            b.vx += (parent.x - b.x) * lagFactor;
-            b.vy += (parent.y - b.y - 0.05) * lagFactor;
-            b.radius = parent.radius * 0.5;
-            b.baseRadius = parent.baseRadius * 0.5;
-        }
+        // Gentle gravity always pulling down
+        b.vy -= 0.00008 * dt * 60;
 
-        // Noise-based perturbation (organic movement)
-        const nx = simplex2D(b.x * 3.0 + time * 0.1, b.y * 3.0 + i * 10.0) * 0.00010;
-        const ny = simplex2D(b.x * 3.0 + i * 10.0, b.y * 3.0 + time * 0.1 + 100.0) * 0.00006;
+        // Noise perturbation for organic movement
+        const nx = simplex2D(b.x * 3.0 + time * 0.08, b.y * 3.0 + i * 10.0) * 0.0001;
+        const ny = simplex2D(b.x * 3.0 + i * 10.0, b.y * 3.0 + time * 0.08 + 100.0) * 0.00006;
         b.vx += nx;
         b.vy += ny;
 
-        // Viscous damping
-        b.vx *= DAMPING;
-        b.vy *= DAMPING;
+        // Damping (viscous)
+        b.vx *= damping;
+        b.vy *= damping;
+
+        // Trail blobs: loosely follow a primary blob
+        if (i >= trailStart) {
+            const leader = blobs[i % trailStart];
+            const dx = leader.x - b.x;
+            const dy = leader.y - b.y;
+            b.vx += dx * 0.003;
+            b.vy += dy * 0.003;
+        }
 
         // Update position
         b.x += b.vx;
         b.y += b.vy;
 
-        // Wall collisions - tighter bounds for first 6 blobs to encourage merging
-        if (i < 6) {
-            if (b.x < 0.3) { b.x = 0.3; b.vx = Math.abs(b.vx) * 0.5; }
-            if (b.x > 0.7) { b.x = 0.7; b.vx = -Math.abs(b.vx) * 0.5; }
-        } else {
-            if (b.x < 0.2) { b.x = 0.2; b.vx = Math.abs(b.vx) * 0.5; }
-            if (b.x > 0.8) { b.x = 0.8; b.vx = -Math.abs(b.vx) * 0.5; }
-        }
-        if (b.y < 0.05) { b.y = 0.05; b.vy = Math.abs(b.vy) * 0.3; }
-        if (b.y > 0.95) { b.y = 0.95; b.vy = -Math.abs(b.vy) * 0.3; }
-
-        // Radius pulsing with temperature modulation
-        b.radius += Math.sin(time * 0.4 + i * 1.7) * 0.002 * (0.5 + b.temperature);
+        // Container bounds
+        const xMin = 0.22, xMax = 0.78;
+        const yMin = 0.06, yMax = 0.94;
+        if (b.x < xMin) { b.x = xMin; b.vx = Math.abs(b.vx) * 0.3; }
+        if (b.x > xMax) { b.x = xMax; b.vx = -Math.abs(b.vx) * 0.3; }
+        if (b.y < yMin) { b.y = yMin; b.vy = Math.abs(b.vy) * 0.2; }
+        if (b.y > yMax) { b.y = yMax; b.vy = -Math.abs(b.vy) * 0.2; }
     }
 }
 
@@ -452,8 +406,7 @@ function render(timestamp) {
 
     const blobData = [];
     for (let i = 0; i < NUM_BLOBS; i++) {
-        const speed = Math.sqrt(blobs[i].vx * blobs[i].vx + blobs[i].vy * blobs[i].vy);
-        blobData.push(blobs[i].x, blobs[i].y, blobs[i].radius, speed);
+        blobData.push(blobs[i].x, blobs[i].y, blobs[i].radius, blobs[i].vy);
     }
     gl.uniform4fv(u_blobs_loc, blobData);
 
