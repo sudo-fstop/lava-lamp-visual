@@ -1,0 +1,8 @@
+{
+  "name": "lava-lamp-visual",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "check": "node -e \"const fs = require('fs'); const html = fs.readFileSync('index.html', 'utf8'); let ok = true; if (!html.includes('<!DOCTYPE html>')) { console.error('Missing DOCTYPE'); ok = false; } if (!html.includes('<canvas')) { console.error('Missing canvas element'); ok = false; } if (!html.includes('getContext')) { console.error('Missing WebGL context creation'); ok = false; } if (!html.includes('requestAnimationFrame')) { console.error('Missing animation loop'); ok = false; } if (!html.includes('smoothstep')) { console.error('Missing smoothstep in shader'); ok = false; } if (!html.includes('u_blobs')) { console.error('Missing blob uniforms'); ok = false; } if (ok) { console.log('All checks passed'); } else { process.exit(1); }\""
+  }
+}
