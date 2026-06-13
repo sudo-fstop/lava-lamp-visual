@@ -11,7 +11,7 @@ html, body {
     overflow: hidden;
     width: 100%;
     height: 100%;
-    background: #1a0a0a;
+    background: #0d0805;
 }
 canvas#glcanvas {
     display: block;
@@ -136,15 +136,15 @@ precision highp float;
 uniform vec2 u_resolution;
 uniform float u_time;
 
-#define NUM_BLOBS 25
+#define NUM_BLOBS 8
 uniform vec4 u_blobs[NUM_BLOBS]; // xy = position, z = radius, w = velocity_y
 
 // Tuning parameters
-#define BLEND_K 0.12
+#define BLEND_K 0.30
 #define NOISE_AMP 0.018
 #define NOISE_FREQ 3.5
 #define NOISE_TIME_SCALE 0.1
-#define EDGE_WIDTH 0.007
+#define EDGE_WIDTH 0.018
 #define FBM_OCTAVES 3
 
 // Hash-based pseudo-random
@@ -262,12 +262,12 @@ void main() {
     }
 
     // Background
-    vec3 bgBottom = vec3(0.10, 0.01, 0.01);
-    vec3 bgTop = vec3(0.01, 0.01, 0.04);
+    vec3 bgBottom = vec3(0.05, 0.03, 0.02);
+    vec3 bgTop = vec3(0.05, 0.03, 0.02);
     vec3 bg = mix(bgBottom, bgTop, uv.y);
 
     // Oil medium background (inside container, behind blobs)
-    vec3 oilColor = vec3(0.08, 0.03, 0.01);
+    vec3 oilColor = vec3(0.18, 0.10, 0.05);
     float shimmer = fbm(p * 4.0 + vec2(u_time * 0.02, u_time * 0.015), 2) * 0.03;
     oilColor += vec3(0.5, 0.3, 0.1) * shimmer;
 
@@ -310,14 +310,12 @@ gl.enableVertexAttribArray(a_pos);
 gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, false, 0, 0);
 
 // ── Blob Physics ──
-const NUM_BLOBS = 25;
+const NUM_BLOBS = 8;
 const blobs = [];
 for (let i = 0; i < NUM_BLOBS; i++) {
     let r;
-    if (i < 3)       r = 0.035 + Math.random() * 0.015;  // 3 large primary blobs
-    else if (i < 8)   r = 0.020 + Math.random() * 0.010;  // 5 medium blobs
-    else if (i < 15)  r = 0.012 + Math.random() * 0.006;  // 7 small blobs
-    else              r = 0.006 + Math.random() * 0.004;  // 10 trail/micro blobs
+    if (i < 3)       r = 0.10 + Math.random() * 0.05;   // 3 large blobs (0.10–0.15)
+    else              r = 0.03 + Math.random() * 0.03;   // 5 smaller blobs (0.03–0.06)
 
     blobs.push({
         x: 0.3 + Math.random() * 0.4,
@@ -333,7 +331,7 @@ for (let i = 0; i < NUM_BLOBS; i++) {
 function updateBlobs(dt, time) {
     const heatZone = 0.15;
     const coolZone = 0.85;
-    const damping = 0.97;
+    const damping = 0.95;
     const trailStart = 15;
 
     for (let i = 0; i < NUM_BLOBS; i++) {
@@ -353,15 +351,15 @@ function updateBlobs(dt, time) {
         b.radius = b.baseRadius * tempScale + Math.sin(time * 0.4 + i * 1.7) * 0.002;
 
         // Buoyancy based on temperature (hot rises, cold sinks)
-        const buoyancy = (b.temperature - 0.45) * 0.0006;
+        const buoyancy = (b.temperature - 0.45) * 0.0048;
         b.vy += buoyancy * dt * 60;
 
         // Gentle gravity always pulling down
         b.vy -= 0.00008 * dt * 60;
 
         // Noise perturbation for organic movement
-        const nx = simplex2D(b.x * 3.0 + time * 0.08, b.y * 3.0 + i * 10.0) * 0.0001;
-        const ny = simplex2D(b.x * 3.0 + i * 10.0, b.y * 3.0 + time * 0.08 + 100.0) * 0.00006;
+        const nx = simplex2D(b.x * 3.0 + time * 0.08, b.y * 3.0 + i * 10.0) * 0.0005;
+        const ny = simplex2D(b.x * 3.0 + i * 10.0, b.y * 3.0 + time * 0.08 + 100.0) * 0.0003;
         b.vx += nx;
         b.vy += ny;
 
